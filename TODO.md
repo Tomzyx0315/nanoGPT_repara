@@ -1,0 +1,2 @@
+控制随机种子
+加weight distribution检查（服务器端代码已部分加该特性）

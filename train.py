@@ -28,6 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
+from model_modified import GPT_modified # 两个py文件里有相同的module，虽然没有明确import，但是会不会导致冲突？
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -251,6 +252,83 @@ X, Y = get_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
+
+def log_v_distribution(model, it, out_dir=out_dir, bins=120):
+    """
+    为每一层分别保存 Q、K、V 三个权重矩阵的单独直方图（不做合并、不保存统计量）。
+    文件名格式：
+      out/qkv_logs/q_hist_layer{layer:02d}_iter{it:09d}.png
+      out/qkv_logs/k_hist_layer{layer:02d}_iter{it:09d}.png
+      out/qkv_logs/v_hist_layer{layer:02d}_iter{it:09d}.png
+    只处理标准的 c_attn concat 布局（weight.shape[0] % 3 == 0），否则跳过该层。
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception:
+        print("matplotlib not available, skipping qkv plotting")
+        return
+
+    if not hasattr(model, 'transformer') or not hasattr(model.transformer, 'h'):
+        print("model has no transformer.h, skipping qkv plotting")
+        return
+
+    os.makedirs(os.path.join(out_dir, 'q_logs'), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, 'k_logs'), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, 'v_logs'), exist_ok=True)
+
+    found = False
+    for li, block in enumerate(model.transformer.h):
+        attn = getattr(block, 'attn', None)
+        if attn is None:
+            continue
+        lin = getattr(attn, 'c_attn', None)
+        if lin is None:
+            continue
+        wt = lin.weight.detach().cpu().numpy()
+        if wt.ndim != 2 or wt.shape[0] % 3 != 0:
+            # 非标准形状，跳过该层以保证严格的 Q/K/V 三分图要求
+            print(f"layer {li}: c_attn weight has unexpected shape {wt.shape}, skipping")
+            continue
+        found = True
+        c = wt.shape[0] // 3
+        q = wt[0:c, :].ravel()
+        k = wt[c:2*c, :].ravel()
+        v = wt[2*c:3*c, :].ravel()
+
+        # 单独绘制 Q
+        plt.figure(figsize=(6,4))
+        plt.hist(q, bins=bins, density=True, color='C0')
+        plt.title(f'Layer {li:02d} Q weight distribution (iter {it})')
+        plt.xlabel('weight value'); plt.ylabel('density')
+        fname_q = os.path.join(out_dir, 'q_logs', f"q_hist_layer{li:02d}_iter{it:09d}.png")
+        plt.savefig(fname_q, bbox_inches='tight', dpi=150)
+        plt.close()
+
+        # 单独绘制 K
+        plt.figure(figsize=(6,4))
+        plt.hist(k, bins=bins, density=True, color='C1')
+        plt.title(f'Layer {li:02d} K weight distribution (iter {it})')
+        plt.xlabel('weight value'); plt.ylabel('density')
+        fname_k = os.path.join(out_dir, 'k_logs', f"k_hist_layer{li:02d}_iter{it:09d}.png")
+        plt.savefig(fname_k, bbox_inches='tight', dpi=150)
+        plt.close()
+
+        # 单独绘制 V
+        plt.figure(figsize=(6,4))
+        plt.hist(v, bins=bins, density=True, color='C2')
+        plt.title(f'Layer {li:02d} V weight distribution (iter {it})')
+        plt.xlabel('weight value'); plt.ylabel('density')
+        fname_v = os.path.join(out_dir, 'v_logs', f"v_hist_layer{li:02d}_iter{it:09d}.png")
+        plt.savefig(fname_v, bbox_inches='tight', dpi=150)
+        plt.close()
+
+        print(f"saved Q/K/V histograms for layer {li} to {os.path.join(out_dir,'qkv_logs')}")
+
+    if not found:
+        print("no valid c_attn weights found, skipping qkv plotting")
+
 running_mfu = -1.0
 while True:
 
