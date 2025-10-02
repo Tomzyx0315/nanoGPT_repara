@@ -27,7 +27,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-from model import GPTConfig, GPT
+from model_modified import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -257,25 +257,28 @@ def log_weight_distribution(model, it, out_dir=out_dir, bins=120):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    os.makedirs(os.path.join(out_dir, 'q_logs'), exist_ok=True)
-    os.makedirs(os.path.join(out_dir, 'k_logs'), exist_ok=True)
-    os.makedirs(os.path.join(out_dir, 'v_logs'), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, 'q_logs', 'gpt_modified'), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, 'k_logs', 'gpt_modified'), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, 'v_logs', 'gpt_modified'), exist_ok=True)
 
     found = False
     for li, block in enumerate(model.transformer.h):
         attn = getattr(block, 'attn', None)
         if attn is None:
             continue
-        lin = getattr(attn, 'c_attn', None)
-        if lin is None:
+        lin1 = getattr(attn, 'c_attn_epsilon', None)
+        lin2 = getattr(attn, 'c_attn_w', None)
+        if lin1 is None or lin2 is None:
             continue
-        wt = lin.weight.detach().cpu().numpy()
-        if wt.ndim != 2 or wt.shape[0] % 3 != 0:
+        wt1 = lin1.detach().cpu().numpy()
+        wt2 = lin2.detach().cpu().numpy()
+        if wt1.ndim != 2 or wt1.shape[0] % 3 != 0 or wt2.ndim != 2 or wt2.shape[0] % 3 != 0:
             # 非标准形状，跳过该层以保证严格的 Q/K/V 三分图要求
-            print(f"layer {li}: c_attn weight has unexpected shape {wt.shape}, skipping")
+            print(f"layer {li}: c_attn weight has unexpected shape {wt1.shape}, {wt2.shape}, skipping")
             continue
 
         found = True
+        wt = wt1 + np.sinh(wt2)
         c = wt.shape[0] // 3
         q = wt[0:c, :].ravel()
         k = wt[c:2*c, :].ravel()
@@ -286,7 +289,7 @@ def log_weight_distribution(model, it, out_dir=out_dir, bins=120):
         plt.hist(q, bins=bins, density=True, color='C0')
         plt.title(f'Layer {li:02d} Q weight distribution (iter {it})')
         plt.xlabel('weight value'); plt.ylabel('density')
-        fname_q = os.path.join(out_dir, 'q_logs', f"q_hist_layer{li:02d}_iter{it:09d}.png")
+        fname_q = os.path.join(out_dir, 'q_logs', 'gpt_modified', f"q_hist_layer{li:02d}_iter{it:09d}.png")
         plt.savefig(fname_q, bbox_inches='tight', dpi=150)
         plt.close()
 
@@ -295,7 +298,7 @@ def log_weight_distribution(model, it, out_dir=out_dir, bins=120):
         plt.hist(k, bins=bins, density=True, color='C1')
         plt.title(f'Layer {li:02d} K weight distribution (iter {it})')
         plt.xlabel('weight value'); plt.ylabel('density')
-        fname_k = os.path.join(out_dir, 'k_logs', f"k_hist_layer{li:02d}_iter{it:09d}.png")
+        fname_k = os.path.join(out_dir, 'k_logs', 'gpt_modified', f"k_hist_layer{li:02d}_iter{it:09d}.png")
         plt.savefig(fname_k, bbox_inches='tight', dpi=150)
         plt.close()
 
@@ -304,11 +307,11 @@ def log_weight_distribution(model, it, out_dir=out_dir, bins=120):
         plt.hist(v, bins=bins, density=True, color='C2')
         plt.title(f'Layer {li:02d} V weight distribution (iter {it})')
         plt.xlabel('weight value'); plt.ylabel('density')
-        fname_v = os.path.join(out_dir, 'v_logs', f"v_hist_layer{li:02d}_iter{it:09d}.png")
+        fname_v = os.path.join(out_dir, 'v_logs', 'gpt_modified', f"v_hist_layer{li:02d}_iter{it:09d}.png")
         plt.savefig(fname_v, bbox_inches='tight', dpi=150)
         plt.close()
 
-        print(f"saved Q/K/V histograms for layer {li} to {os.path.join(out_dir,'qkv_logs')}")
+        print(f"saved Q/K/V histograms for layer {li}")
 
     if not found:
         print("no valid c_attn weights found, skipping qkv plotting")
@@ -316,14 +319,14 @@ def log_weight_distribution(model, it, out_dir=out_dir, bins=120):
 running_mfu = -1.0
 while True:
 
-    # 每100步记录一次权重分布
-    if iter_num % 100 == 0 and master_process:
-        log_weight_distribution(raw_model, iter_num)
-
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+
+    # 每100步记录一次权重分布
+    if iter_num % 100 == 0 and master_process:
+        log_weight_distribution(raw_model, iter_num)
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
@@ -391,6 +394,7 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+    
     iter_num += 1
     local_iter_num += 1
 

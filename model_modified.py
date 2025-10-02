@@ -26,7 +26,7 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
-class CausalSelfAttention_modified(nn.Module):
+class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
@@ -107,12 +107,12 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
-class Block_modified(nn.Module):
+class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention_modified(config)
+        self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
@@ -131,7 +131,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
-class GPT_modified(nn.Module):
+class GPT(nn.Module):
 
     def __init__(self, config):
         super().__init__()
@@ -143,7 +143,7 @@ class GPT_modified(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block_modified(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -182,7 +182,7 @@ class GPT_modified(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        elif isinstance(module, CausalSelfAttention_modified):
+        elif isinstance(module, CausalSelfAttention):
             # Initialize epsilon for sinh parameterization
             torch.nn.init.normal_(module.c_attn_epsilon, mean=0.0, std=0.02)
             # w is already initialized to zeros in __init__
@@ -225,7 +225,7 @@ class GPT_modified(nn.Module):
                 block.attn.bias = block.attn.bias[:,:,:block_size,:block_size]
 
 #    @classmethod
-#    def from_pretrained(...) 对于GPT_modified用不到
+#    def from_pretrained(...) 对于GPT用不到
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
